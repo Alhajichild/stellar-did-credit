@@ -2918,6 +2918,29 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * List all registered issuers and their trust multiplier tiers.
+   *
+   * @returns Array of IssuerTier objects containing issuer address, bps, and multiplier string
+   */
+  async listIssuerTiers(): Promise<IssuerTier[]> {
+    const issuers = await this.listIssuers();
+    const results: IssuerTier[] = [];
+    for (const issuer of issuers) {
+      try {
+        const bps = await this.getIssuerTier(issuer);
+        results.push({
+          issuer,
+          bps,
+          multiplier: `${bps} bps = ${(bps / 100).toFixed(2)}x`,
+        });
+      } catch {
+        // Skip issuers that fail to query
+      }
+    }
+    return results;
+  }
+
+  /**
    * Returns the list of all currently registered (non-deregistered) trusted issuers.
    *
    * Calls `list_issuers` on the identity-oracle contract via read-only simulation.
