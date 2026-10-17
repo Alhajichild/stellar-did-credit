@@ -273,6 +273,22 @@ function printWeights(weights: ScoringWeights): void {
   console.log();
 }
 
+function printProtocolStats(title: string, stats: object): void {
+  const rows = Object.entries(stats).map(([field, value]) => [field, String(value)]);
+  const fieldWidth = Math.max("Counter".length, ...rows.map(([field]) => field.length));
+  const valueWidth = Math.max("Value".length, ...rows.map(([, value]) => value.length));
+  const border = `+${"-".repeat(fieldWidth + 2)}+${"-".repeat(valueWidth + 2)}+`;
+
+  console.log(title);
+  console.log(border);
+  console.log(`| ${"Counter".padEnd(fieldWidth)} | ${"Value".padEnd(valueWidth)} |`);
+  console.log(border);
+  rows.forEach(([field, value]) => {
+    console.log(`| ${field.padEnd(fieldWidth)} | ${value.padEnd(valueWidth)} |`);
+  });
+  console.log(border);
+}
+
 /**
  * Print a subject's on-chain TxStats as a human-readable table, in the same
  * boxed style used by printScoreRecord() for `get-score`.
@@ -932,6 +948,60 @@ program
 // ---------------------------------------------------------------------------
 // Command: weights
 // ---------------------------------------------------------------------------
+
+const protocolStats = program
+  .command("protocol-stats")
+  .description("Fetch aggregate protocol counters.");
+
+protocolStats
+  .command("identity")
+  .description("Fetch aggregate identity-oracle counters.")
+  .option("--json", "Output as JSON")
+  .action(async (cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["identityOracleId"], true);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    try {
+      const stats: IdentityProtocolStats = await sdk.getIdentityProtocolStats();
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(stats));
+      } else {
+        printProtocolStats("Identity Protocol Stats", stats);
+      }
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+protocolStats
+  .command("credit")
+  .description("Fetch aggregate credit-oracle counters.")
+  .option("--json", "Output as JSON")
+  .action(async (cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["creditOracleId"], true);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    try {
+      const stats: CreditProtocolStats = await sdk.getCreditProtocolStats();
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(stats));
+      } else {
+        printProtocolStats("Credit Protocol Stats", stats);
+      }
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
 
 program
   .command("weights")
