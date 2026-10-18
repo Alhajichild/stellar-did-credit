@@ -820,13 +820,30 @@ describe("StellarDIDCreditSDK", () => {
         value: { value: [eventSubject, inputKey] },
       });
 
-      it("fires the callback for all three dispute event types", async () => {
+      it.each<DisputeEvent>([
+        {
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        },
+        {
+          eventType: "DsptRslv",
+          subject: subjectAddress,
+          inputKey: "repayment",
+          status: "Resolved",
+        },
+        {
+          eventType: "DsptRjct",
+          subject: subjectAddress,
+          inputKey: "vc_count",
+          status: "Rejected",
+        },
+      ])("delivers $eventType with status $status", async (expected) => {
         mockGetEvents.mockResolvedValueOnce({
           latestLedger: 100,
           events: [
-            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
-            disputeEvent("DsptRslv", subjectAddress, "repayment"),
-            disputeEvent("DsptRjct", subjectAddress, "vc_count"),
+            disputeEvent(expected.eventType, subjectAddress, expected.inputKey),
           ],
         });
 
@@ -839,29 +856,9 @@ describe("StellarDIDCreditSDK", () => {
           received.push(event),
         );
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
-        expect(received).toEqual([
-          {
-            eventType: "DsptFild",
-            subject: subjectAddress,
-            inputKey: "tx_stats",
-            status: "Pending",
-          },
-          {
-            eventType: "DsptRslv",
-            subject: subjectAddress,
-            inputKey: "repayment",
-            status: "Resolved",
-          },
-          {
-            eventType: "DsptRjct",
-            subject: subjectAddress,
-            inputKey: "vc_count",
-            status: "Rejected",
-          },
-        ]);
+        expect(received).toEqual([expected]);
 
         unsubscribe();
       });
@@ -869,8 +866,11 @@ describe("StellarDIDCreditSDK", () => {
       it("queries all three dispute topics on the credit-oracle in one poll", async () => {
         mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
 
+        const creditOracleId =
+          "CCREDITORACLEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         const sdk = new StellarDIDCreditSDK({
           ...mockConfig,
+          creditOracleId,
           pollIntervalMs: 10,
         });
         const unsubscribe = sdk.subscribeToDisputeEvents(
@@ -878,8 +878,7 @@ describe("StellarDIDCreditSDK", () => {
           jest.fn(),
         );
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
         expect(mockGetEvents).toHaveBeenCalledTimes(1);
         expect(mockGetEvents).toHaveBeenCalledWith(
@@ -888,7 +887,7 @@ describe("StellarDIDCreditSDK", () => {
             filters: [
               {
                 type: "contract",
-                contractIds: [mockConfig.creditOracleId],
+                contractIds: [creditOracleId],
                 topics: [
                   ["symbol:DsptFild"],
                   ["symbol:DsptRslv"],
@@ -902,13 +901,17 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
-      it("ignores disputes from other subjects and unrelated topics", async () => {
+      it.each([
+        ["DsptFild", "Pending"],
+        ["DsptRslv", "Resolved"],
+        ["DsptRjct", "Rejected"],
+      ])("filters %s disputes by subject", async (eventType, status) => {
         mockGetEvents.mockResolvedValueOnce({
           latestLedger: 100,
           events: [
-            disputeEvent("DsptFild", otherSubject, "tx_stats"),
-            disputeEvent("Score", subjectAddress, "tx_stats"),
-            disputeEvent("DsptFild", subjectAddress, "vc_count"),
+            disputeEvent(eventType, otherSubject, "tx_stats"),
+            disputeEvent(eventType, subjectAddress, "vc_count"),
+            disputeEvent(eventType, otherSubject, "repayment"),
           ],
         });
 
@@ -919,39 +922,336 @@ describe("StellarDIDCreditSDK", () => {
         const callback = jest.fn();
         const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
         expect(callback).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledWith({
-          eventType: "DsptFild",
+          eventType,
           subject: subjectAddress,
           inputKey: "vc_count",
-          status: "Pending",
+          status,
         });
 
         unsubscribe();
       });
 
+      it.each(["Score", "VCAnch", "Revoked", "Unknown"])(
+        "ignores the unrelated %s topic without skipping valid disputes",
+        async (topic) => {
+          mockGetEvents.mockResolvedValueOnce({
+            latestLedger: 100,
+            events: [
+              disputeEvent(topic, subjectAddress, "tx_stats"),
+              disputeEvent("DsptRslv", subjectAddress, "repayment"),
+            ],
+          });
+          const sdk = new StellarDIDCreditSDK(mockConfig);
+          const callback = jest.fn();
+          const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+          await jest.advanceTimersByTimeAsync(0);
+
+          expect(callback).toHaveBeenCalledTimes(1);
+          expect(callback).toHaveBeenCalledWith({
+            eventType: "DsptRslv",
+            subject: subjectAddress,
+            inputKey: "repayment",
+            status: "Resolved",
+          });
+          unsubscribe();
+        },
+      );
+
+      it("waits through empty polls before delivering a dispute", async () => {
+        mockGetEvents
+          .mockResolvedValueOnce({ latestLedger: 100, events: [] })
+          .mockResolvedValueOnce({
+            latestLedger: 101,
+            events: [
+              {
+                ...disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+            ],
+          });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(callback).not.toHaveBeenCalled();
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+
+        await jest.advanceTimersByTimeAsync(10);
+        expect(mockGetEvents).toHaveBeenCalledTimes(2);
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith({
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        });
+        unsubscribe();
+      });
+
+      it("delivers a mixed dispute batch in order for the requested subject", async () => {
+        mockGetEvents.mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", otherSubject, "tx_stats"),
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", otherSubject, "repayment"),
+            disputeEvent("DsptRslv", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRjct", otherSubject, "vc_count"),
+            disputeEvent("DsptRjct", subjectAddress, "repayment"),
+          ],
+        });
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const received: DisputeEvent[] = [];
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, (event) =>
+          received.push(event),
+        );
+
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(received).toEqual([
+          {
+            eventType: "DsptFild",
+            subject: subjectAddress,
+            inputKey: "tx_stats",
+            status: "Pending",
+          },
+          {
+            eventType: "DsptRslv",
+            subject: subjectAddress,
+            inputKey: "tx_stats",
+            status: "Resolved",
+          },
+          {
+            eventType: "DsptRjct",
+            subject: subjectAddress,
+            inputKey: "repayment",
+            status: "Rejected",
+          },
+        ]);
+        unsubscribe();
+      });
+
+      it.each([
+        ["DsptRslv", "Resolved"],
+        ["DsptRjct", "Rejected"],
+      ])("delivers filing followed by %s across polls", async (eventType, status) => {
+        mockGetEvents
+          .mockResolvedValueOnce({
+            latestLedger: 100,
+            events: [disputeEvent("DsptFild", subjectAddress, "tx_stats")],
+          })
+          .mockResolvedValueOnce({
+            latestLedger: 101,
+            events: [
+              {
+                ...disputeEvent(eventType, subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+            ],
+          });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenNthCalledWith(1, {
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        });
+
+        await jest.advanceTimersByTimeAsync(10);
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback).toHaveBeenNthCalledWith(2, {
+          eventType,
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status,
+        });
+        expect(mockGetEvents).toHaveBeenNthCalledWith(
+          2,
+          expect.objectContaining({ startLedger: 101 }),
+        );
+        unsubscribe();
+      });
+
+      it("can unsubscribe while the initial ledger request is pending", async () => {
+        let resolveLedger!: (ledger: { sequence: number }) => void;
+        mockGetLatestLedger.mockReturnValueOnce(
+          new Promise<{ sequence: number }>((resolve) => {
+            resolveLedger = resolve;
+          }),
+        );
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);
+        unsubscribe();
+        resolveLedger({ sequence: 100 });
+        await jest.advanceTimersByTimeAsync(30);
+
+        expect(mockGetEvents).not.toHaveBeenCalled();
+        expect(callback).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
+      it("ignores an in-flight dispute response after unsubscribe", async () => {
+        const response = {
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", subjectAddress, "repayment"),
+            disputeEvent("DsptRjct", subjectAddress, "vc_count"),
+          ],
+        };
+        let resolveEvents!: (value: typeof response) => void;
+        mockGetEvents.mockReturnValueOnce(
+          new Promise<typeof response>((resolve) => {
+            resolveEvents = resolve;
+          }),
+        );
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        unsubscribe();
+        resolveEvents(response);
+        await jest.advanceTimersByTimeAsync(30);
+
+        expect(callback).not.toHaveBeenCalled();
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
+      it("stops the current dispute batch when unsubscribed inside the callback", async () => {
+        mockGetEvents.mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRjct", subjectAddress, "repayment"),
+          ],
+        });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn(() => unsubscribe());
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(30);
+
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith({
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        });
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
+      it("keeps another subject subscribed when one subscription is stopped", async () => {
+        const initialResponse = {
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptFild", otherSubject, "repayment"),
+          ],
+        };
+        mockGetEvents
+          .mockResolvedValueOnce(initialResponse)
+          .mockResolvedValueOnce(initialResponse)
+          .mockResolvedValueOnce({
+            latestLedger: 101,
+            events: [
+              {
+                ...disputeEvent("DsptRslv", subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+              {
+                ...disputeEvent("DsptRjct", otherSubject, "repayment"),
+                ledger: 101,
+              },
+            ],
+          });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const firstCallback = jest.fn();
+        const secondCallback = jest.fn();
+        const stopFirst = sdk.subscribeToDisputeEvents(
+          subjectAddress,
+          firstCallback,
+        );
+        const stopSecond = sdk.subscribeToDisputeEvents(
+          otherSubject,
+          secondCallback,
+        );
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(firstCallback).toHaveBeenCalledTimes(1);
+        expect(secondCallback).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(2);
+
+        stopFirst();
+        expect(jest.getTimerCount()).toBe(1);
+        await jest.advanceTimersByTimeAsync(10);
+        expect(firstCallback).toHaveBeenCalledTimes(1);
+        expect(secondCallback).toHaveBeenCalledTimes(2);
+        expect(secondCallback).toHaveBeenLastCalledWith({
+          eventType: "DsptRjct",
+          subject: otherSubject,
+          inputKey: "repayment",
+          status: "Rejected",
+        });
+        expect(mockGetEvents).toHaveBeenCalledTimes(3);
+
+        stopSecond();
+        await jest.advanceTimersByTimeAsync(30);
+        expect(mockGetEvents).toHaveBeenCalledTimes(3);
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
       it("stops polling after unsubscribe", async () => {
-        mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
+        mockGetEvents
+          .mockResolvedValueOnce({ latestLedger: 100, events: [] })
+          .mockResolvedValueOnce({ latestLedger: 101, events: [] })
+          .mockResolvedValue({
+            latestLedger: 102,
+            events: [
+              {
+                ...disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+                ledger: 102,
+              },
+            ],
+          });
 
         const sdk = new StellarDIDCreditSDK({
           ...mockConfig,
           pollIntervalMs: 10,
         });
-        const unsubscribe = sdk.subscribeToDisputeEvents(
-          subjectAddress,
-          jest.fn(),
-        );
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
         expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        await jest.advanceTimersByTimeAsync(10);
+        expect(mockGetEvents).toHaveBeenCalledTimes(2);
+        expect(jest.getTimerCount()).toBe(1);
 
         unsubscribe();
+        expect(jest.getTimerCount()).toBe(0);
         await jest.advanceTimersByTimeAsync(30);
-        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(mockGetEvents).toHaveBeenCalledTimes(2);
+        expect(callback).not.toHaveBeenCalled();
       });
     });
 
